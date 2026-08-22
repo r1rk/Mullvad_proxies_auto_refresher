@@ -2,11 +2,12 @@ import os
 import sys
 import json
 import time
+import random
 import argparse
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Dict, Tuple
 
 # ネットワーク通信用
 import requests
@@ -40,10 +41,11 @@ class AppConfig:
     countries: str = ""                         # カンマ区切りの国コード (例: "jp,us")
     target_url: str = "https://icanhazip.com/"  # ヘルスチェック用URL
     interval_minutes: int = 0                   # 定期実行間隔（分）。0は単発実行
-    max_workers: int = 64                       # 同時検証スレッド数（2の倍数：デフォルト64）
+    max_workers: int = 64                       # 同時検証スレッド数（デフォルト: 64）
     timeout_seconds: float = 2.0                # 検証タイムアウト秒数
 
 class ConfigManager:
+    """設定ファイルの読み込みと保存を担当するクラス"""
     @staticmethod
     def load() -> AppConfig:
         if os.path.exists(CONFIG_FILE):
@@ -61,7 +63,7 @@ class ConfigManager:
     def save(config: AppConfig):
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(asdict(config), f, indent=4)
+                json.dump(asdict(config), f, indent=4, ensure_ascii=False)
         except Exception as e:
             print(f"[エラー] 設定の保存に失敗しました: {e}")
 
@@ -112,6 +114,7 @@ class ProxyPipeline:
 
         valid_proxies = []
         completed = 0
+        error_stats: Dict[str, int] = {}
 
         # ThreadPoolExecutorによる並列実行
         with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
@@ -126,21 +129,22 @@ class ProxyPipeline:
                 proxy_addr = future_to_proxy[future]
                 completed += 1
                 try:
-                    exit_ip = future.result()
+                    exit_ip, err_reason = future.result()
                     if exit_ip:
                         valid_proxies.append(proxy_addr)
-                        _log(f"[OK] {proxy_addr:<40} -> 出口IP: {exit_ip}")
                     else:
-                        _log(f"[NG] {proxy_addr:<40} -> タイムアウト/接続エラー")
+                        err_key = err_reason or "Unknown"
+                        error_stats[err_key] = error_stats.get(err_key, 0) + 1
                 except Exception as e:
-                    _log(f"[Err] {proxy_addr:<40} -> {e}")
+                    error_stats["Exception"] = error_stats.get("Exception", 0) + 1
 
                 if progress_callback:
                     progress_callback(completed, total, proxy_addr)
 
         if not self._cancel_requested:
             _log("-" * 60)
-            _log(f"検証完了: {len(valid_proxies)}/{total} 件が有効でした。")
+            err_summary = ", ".join([f"{k}: {v}" for k, v in error_stats.items()]) if error_stats else "全件成功"
+            _log(f"検証完了: {len(valid_proxies)}/{total} 件が有効でした。 [不合格内訳 -> {err_summary}]")
             self._save_to_file(valid_proxies)
             _log(f"結果を {self.config.output_base_name}_*.txt に保存しました。")
 
@@ -153,7 +157,10 @@ class ProxyPipeline:
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            print(f"[エラー] API取得失敗: {e}")
+            if self.log_callback:
+                self.log_callback(f"[エラー] API取得失敗: {e}")
+            else:
+                print(f"[エラー] API取得失敗: {e}")
             return []
 
         proxy_list = []
@@ -168,24 +175,40 @@ class ProxyPipeline:
 
         return proxy_list
 
-    def _validate_proxy(self, proxy_addr: str) -> Optional[str]:
-        """単一のプロキシの疎通を確認し、出口IPを返す。失敗時はNone"""
+    def _validate_proxy(self, proxy_addr: str) -> Tuple[Optional[str], Optional[str]]:
+        """単一のプロキシの疎通を確認し、(出口IP, エラー理由) を返す。
+        ソケット枯渇対策としてセッションを明示的に閉じ、DNS集中負荷緩和のためのジッターを入れる。
+        """
+        # DNS集中負荷を和らげるため、0〜50msのランダムな揺らぎ（Jitter）を入れる
+        time.sleep(random.uniform(0.0, 0.05))
+
         proxy_url = f"socks5h://{proxy_addr}"
         proxies = {
             "http": proxy_url,
             "https": proxy_url
         }
+
         try:
-            res = requests.get(
-                self.config.target_url,
-                proxies=proxies,
-                timeout=self.config.timeout_seconds
-            )
-            if res.status_code == 200:
-                return res.text.strip()
-        except Exception:
-            pass
-        return None
+            with requests.Session() as session:
+                session.proxies = proxies
+                res = session.get(
+                    self.config.target_url,
+                    timeout=self.config.timeout_seconds
+                )
+                if res.status_code == 200:
+                    return res.text.strip(), None
+                else:
+                    return None, f"HTTP_{res.status_code}"
+        except requests.exceptions.ConnectTimeout:
+            return None, "ConnectTimeout"
+        except requests.exceptions.ReadTimeout:
+            return None, "ReadTimeout"
+        except requests.exceptions.ProxyError:
+            return None, "Proxy/DNS_Error"
+        except requests.exceptions.ConnectionError:
+            return None, "ConnectionError"
+        except Exception as e:
+            return None, f"Error_{type(e).__name__}"
 
     def _save_to_file(self, valid_proxies: List[str]):
         """アトミック書き込みで設定された全形式のファイルへ一括保存"""
