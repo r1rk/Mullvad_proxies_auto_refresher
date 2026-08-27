@@ -5,9 +5,12 @@ import time
 import random
 import argparse
 import tempfile
+import sys
+import ctypes
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from typing import List, Optional, Callable, Dict, Tuple
+
 
 # ネットワーク通信用
 import requests
@@ -514,6 +517,14 @@ if HAS_PYQT6:
 # ---------------------------------------------------------
 # 5. エントリーポイント
 # ---------------------------------------------------------
+def hide_console():
+    """Windows環境でコンソールウィンドウを非表示にする"""
+    if sys.platform == "win32":
+        # 実行中のコンソールウィンドウのハンドルを取得して非表示(SW_HIDE=0)にする
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+
 def main():
     parser = argparse.ArgumentParser(description="Mullvad Proxy Manager")
     parser.add_argument("--gui", action="store_true", help="GUIモードで起動します")
@@ -522,10 +533,11 @@ def main():
 
     config = ConfigManager.load()
 
+    # GUIモードで起動された場合は即座に黒い画面を消す
     if args.gui:
+        hide_console()
         if not HAS_PYQT6:
             print("エラー: PyQt6がインストールされていないため、GUIを起動できません。")
-            print("pip install PyQt6 を実行してください。")
             sys.exit(1)
         
         app = QApplication(sys.argv)
