@@ -103,5 +103,3 @@ CLIモード（特に `--run` 実行時）での動作設定は、exeと同じ�
 * `mullvad_proxies_socks5h.txt` (`socks5h://ホスト:1080`)
 * `mullvad_proxies_socks5.txt` (`socks5://ホスト:1080`)
 * `mullvad_proxies_raw.txt` (`ホスト:1080`)
-
-```
