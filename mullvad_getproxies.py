@@ -527,15 +527,15 @@ def hide_console():
 
 def main():
     parser = argparse.ArgumentParser(description="Mullvad Proxy Manager")
-    parser.add_argument("--gui", action="store_true", help="GUIモードで起動します")
+    parser.add_argument("--cli", action="store_true", help="対話型CLIモードで起動します")
     parser.add_argument("--run", action="store_true", help="CLIで即時1回実行して終了します")
     args = parser.parse_args()
 
     config = ConfigManager.load()
 
-    # GUIモードで起動された場合は即座に黒い画面を消す
-    if args.gui:
-        hide_console()
+    # --cli や --run の指定がない場合（ダブルクリック時など）はGUIで起動
+    if not args.cli and not args.run:
+        hide_console()  # コンソール画面を一瞬で非表示にする
         if not HAS_PYQT6:
             print("エラー: PyQt6がインストールされていないため、GUIを起動できません。")
             sys.exit(1)
@@ -545,6 +545,7 @@ def main():
         window.show()
         sys.exit(app.exec())
     else:
+        # CLIモードでの実行
         if args.run:
             pipeline = ProxyPipeline(config)
             pipeline.run()
